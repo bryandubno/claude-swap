@@ -1850,6 +1850,27 @@ class AutoSwitchEngine:
                 # headroom beats a blocked or dead one.
                 if (100.0 - h) >= settings.threshold and not all_above:
                     continue
+                if trigger == "consume-first":
+                    # A below-threshold consume-first move is optional — staying
+                    # put is always correct here — so it must not make ANY model
+                    # worse, whether or not autoswitch.model names it. Landing
+                    # on a peer whose per-model weekly window (e.g. Fable) is
+                    # at/over the threshold trades a working model for a spent
+                    # one. Forced moves (proactive, at-limit, failover) keep
+                    # reading only the configured windows: cswap cannot tell
+                    # which model the user runs, and refusing those would
+                    # strand an Opus- or Sonnet-only user on an account at its
+                    # limit. (Never all_above here: that needs the active
+                    # account at/over the threshold.)
+                    value = usage.get(num)
+                    every_window = oauth.account_headroom(
+                        value if isinstance(value, dict) else None, ("all",)
+                    )
+                    if (
+                        every_window is not None
+                        and (100.0 - every_window) >= settings.threshold
+                    ):
+                        continue
                 if all_above:
                     # Checked before the strategies, because with nothing below
                     # the threshold the strategy question is moot: consume-first

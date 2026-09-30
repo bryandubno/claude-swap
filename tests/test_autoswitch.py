@@ -2782,6 +2782,14 @@ def _usage7(pct5: float, pct7: float, reset7: str | None = None) -> dict:
     return {"five_hour": {"pct": pct5}, "seven_day": seven}
 
 
+def _usage7_model(pct5: float, pct7: float, reset7: str, *, fable: float) -> dict:
+    """``_usage7`` plus a per-model (Fable) weekly window sharing the 7d reset,
+    the shape the usage API reports it in."""
+    usage = _usage7(pct5, pct7, reset7)
+    usage["scoped"] = [{"name": "Fable", "pct": fable, "resets_at": reset7}]
+    return usage
+
+
 class TestConsumeFirstStrategy:
     def _harness(self, temp_home: Path) -> EngineHarness:
         h = EngineHarness(temp_home, strategy="consume-first")
@@ -2862,6 +2870,78 @@ class TestConsumeFirstStrategy:
             "its weekly window resets sooner — it re-triggers next tick"
         )
         assert h.active_number() == 1
+
+    def test_never_lands_on_a_spent_model_window_it_was_not_told_about(
+        self, temp_home
+    ):
+        """A below-threshold consume-first move is optional, so it must not make
+        any model worse — `autoswitch.model` set or not.
+
+        The shape that prompted this: the active account had its whole week
+        and its Fable window nearly untouched, and the peer resetting sooner
+        had Fable maxed. With `autoswitch.model` unset the peer read as 84%
+        used (its 5h window) — under the threshold — so consume-first moved
+        onto it and every Fable request started failing.
+        """
+        h = EngineHarness(temp_home, strategy="consume-first")
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com")
+        h.make_live("a@example.com", 1)
+
+        outcome = h.tick_with_usage({
+            "1": _usage7_model(0, 8, _R_LATEST, fable=13),
+            "2": _usage7_model(84, 77, _R_SOON, fable=100),
+        })
+        assert outcome is TickOutcome.NO_ACTION, (
+            "consume-first moved onto an account whose Fable weekly limit is "
+            "spent because autoswitch.model was unset"
+        )
+        assert h.active_number() == 1
+        reasons = [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
+        assert reasons == ["already-consuming-soonest"]
+
+    def test_a_spent_model_window_passes_to_the_next_sooner_peer(self, temp_home):
+        # #2 resets soonest but its Fable window is over the threshold; #3
+        # still resets sooner than the active account and has Fable room.
+        h = self._harness(temp_home)
+        outcome = h.tick_with_usage({
+            "1": _usage7_model(20, 20, _R_LATEST, fable=20),
+            "2": _usage7_model(10, 10, _R_SOON, fable=95),
+            "3": _usage7_model(10, 10, _R_LATER, fable=40),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 3
+
+    def test_a_model_window_under_the_threshold_still_qualifies(self, temp_home):
+        # Same gate as the 5h/7d landing check: strictly below the threshold
+        # (default 90) is a healthy landing.
+        h = self._harness(temp_home)
+        outcome = h.tick_with_usage({
+            "1": _usage7_model(20, 20, _R_LATER, fable=20),
+            "2": _usage7_model(10, 10, _R_SOON, fable=89),
+            "3": _usage7_model(10, 10, _R_LATEST, fable=0),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    def test_forced_moves_still_read_only_the_configured_windows(self, temp_home):
+        """Over the threshold the move is not optional: the active account is
+        about to hit its limit. cswap cannot tell which model the user runs,
+        so an unconfigured model window must not strand an Opus- or
+        Sonnet-only user on an account at its limit. Opting in with
+        `autoswitch.model` is what makes that window bind here.
+        """
+        h = EngineHarness(temp_home, strategy="consume-first")
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com")
+        h.make_live("a@example.com", 1)
+
+        outcome = h.tick_with_usage({
+            "1": _usage7_model(95, 40, _R_LATEST, fable=0),
+            "2": _usage7_model(10, 10, _R_SOON, fable=100),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
 
     def test_respects_cooldown(self, temp_home):
         h = self._harness(temp_home)  # default cooldown 300s
